@@ -1,198 +1,283 @@
-# Mail fetch and forward script
-# Fetches mail from a target POP3 server, removes all X header extensions, rewrites the target address and forwards the mail to a list of recipients
-# Schier Michael
+"""
+Mail fetch and forward script
 
+Fetches mail from a target POP3 server, removes all X header extensions, rewrites the target address and forwards 
+the mail to a list of recipients
+"""
+
+import os
+import time
 import poplib
 import smtplib
 import email
-import email.header
+import sys
+import ConfigParser
+import logging
 from datetime import datetime
-import fcntl
+from logging.handlers import TimedRotatingFileHandler
+log = logging.getLogger()
 
-maildir = "/opt/simple_list_mailer/mail/"
-mailRecipientsFile = "/opt/simple_list_mailer/recipients.txt"
-mailBannedFile = "/opt/simple_list_mailer/banned.txt"
 
-subjectPrefix = "[ML] "
-listAddr = "mailing-list@email.com"
-pophost = "pop.email.com"
-smtphost = "smtp.email.com"
-popuser = "mailing-list_pop"
-smtpuser = "mailing-list_smtp"
-poppass = "mailing-list_pop_pass"
-smtppass = "mailing-list_smtp_pass"
+def clean_mail_address(addr):
+    while addr.count('<') > 0:
+        addr = addr[addr.index('<') + 1:]
+    while addr.count('>') > 0:
+        addr = addr[:addr.index('>')]
+    return addr.lower()
 
-def getRecipients():
-	recipients = []
-	f = open(mailRecipientsFile, "r")
-	for line in f:
-		recipients.append(line.strip())
-	f.close()
-	return recipients
 
-def getBanned():
-	banned = []
-	f = open(mailBannedFile, "r")
-	for line in f:
-		banned.append(line.strip())
-	f.close()
-	return banned
+class SimpleListMailer(object):
 
-def setRecipients(recipients):
-	f = open(mailRecipientsFile, "w")
-	for r in recipients:
-		f.write(r + "\n")
-	f.close()
+    def __init__(self, config_filename):
+        self.__config_filename = config_filename
 
-def plainMail(mailaddr):
-	while mailaddr.count("<")>0:
-		mailaddr = mailaddr[mailaddr.index("<")+1:]
-	while mailaddr.count(">")>0:
-		mailaddr = mailaddr[:mailaddr.index(">")]
-	return mailaddr.lower()
+    @property
+    def list_address(self):
+        return clean_mail_address(self.config.get('DEFAULT', 'address'))
 
-def forwardMsg(smtpcon, msg):
-	allowed = ['From', 'Date', 'Subject', 'Message-ID', 'MIME-Version', 'Content-Type', 'Content-Transfer-Encoding', 'In-Reply-To', 'References', 'Received']
-	for item in msg.items():
-		if allowed.count(item[0]) == 0:
-#			print "Removing " + item[0] + ": " + item[1]
-			del msg[item[0]]
-	msg['Reply-To'] = listAddr
-	msg['To'] = listAddr
-	subject = msg['Subject']
-	if subject == None:
-		subject = ""
-	subjectheader = email.header.decode_header(subject)[0]
-	subject = subjectheader[0]
-	charset = subjectheader[1]
-	for bad in [subjectPrefix, "Antwort: ", "RE: ", "Re: ", "AW: ", "Aw: "]:
-		subject = subject.replace(bad, "") 
-	subject = subjectPrefix + subject
-	del msg['Subject']
-	msg['Subject'] = subject
-	subject = email.header.make_header([(subject,charset)]).encode()
-	
-	# avoid bouncing
-	msgfrom = plainMail(msg['from'])
-	for toEmail in getRecipients():
-		if toEmail == msgfrom:
-			print "SKIP " + toEmail
-			continue
-		print "RELAY " + toEmail
-		smtpcon.sendmail(listAddr, toEmail, msg.as_string())
+    @property
+    def config(self):
+        config = ConfigParser.RawConfigParser()
+        config.read(self.__config_filename)
+        return config
 
-def logMsg(msg):
-	f = open(maildir + datetime.today().strftime("%Y-%m-%d %H:%M:%S") + " " + plainMail(msg['From']) + ".txt", "w")
-	f.write(msg.as_string())
-	f.close()
+    @property
+    def recipients(self):
+        s = self.config.get('DEFAULT', 'recipients')
+        return map(str.lower, map(str.strip, s.split()))
 
-def adminMsg(smtpcon, msg):
-	print "ADMIN " + msg['Subject']
-	cmd = msg['Subject'][6:]
-	newmsg = email.message.Message()
-	newmsg['From'] = listAddr;
-	newmsg['To'] = plainMail(msg['From'])
-	newmsg['Subject'] = "admin-response to " + cmd
+    @recipients.setter
+    def recipients(self, value):
+        c = self.config
+        value.sort()
+        value = ' '.join(value)
+        c.set('DEFAULT', 'recipients', value)
+        with open(self.__config_filename, 'wb') as configfile:
+            c.write(configfile)
 
-	body = ""
-	recipients = getRecipients()
-	if cmd[:5] == "query":
-		body = "Recipients of mailing-list " + listAddr + ":\r\n\r\n"
-		for r in recipients:
-			body += r + "\r\n"
-	elif cmd[:3] == "del":
-		for m in cmd[3:].split():
-			m = m.lower()
-			m = m.replace("<","").replace(">","")
-			if recipients.count(m) == 0:
-				body += "Recipient " + m + " not in list\r\n"
-				continue
-			recipients.remove(m)
-			body += "Removed recipient " + m + "\r\n"
-		setRecipients(recipients)
-	elif cmd[:3] == "add":
-		for m in cmd[3:].split():
-			m = m.lower()
-			m = m.replace("<","").replace(">","")
-			if recipients.count(m) > 0:
-				body += "Recipient " + m + " already in list\r\n"
-				continue
-			recipients.append(m)
-			body += "Added recipient " + m + "\r\n"
-		setRecipients(recipients)
-	else:
-		body += "Admin commands to be placed in the subject line:\r\n"
-		body += "admin query\r\n"
-		body += "admin add <addr1> <addr2> ... <addrn>\r\n"
-		body += "admin del <addr1> <addr2> ... <addrn>\r\n"
-	newmsg.set_payload(body)
-	smtpcon.sendmail(listAddr, newmsg['To'], newmsg.as_string())
+    @property
+    def banned(self):
+        s = self.config.get('DEFAULT', 'banned')
+        return map(str.lower, map(str.strip, s.split()))
+
+    @banned.setter
+    def banned(self, value):
+        c = self.config
+        value.sort()
+        value = ' '.join(value)
+        c.set('DEFAULT', 'banned', value)
+        with open(self.__config_filename, 'wb') as configfile:
+            c.write(configfile)
+
+    @property
+    def subject_prefix(self):
+        return self.config.get('DEFAULT', 'subject_prefix')
+
+    @property
+    def stripped_subject_prefixes(self):
+        s = self.config.get('DEFAULT', 'stripped_subject_prefixes')
+        return map(str.strip, s.split())
+
+    def _handle_admin_msg(self, pop_connection, smtp_connection, msg):
+        subject = msg['Subject']
+        log.info('Admin message received: <%s>' % subject)
+
+        cmd = subject[6:]
+        newmsg = email.message.Message()
+        newmsg['From'] = self.list_address
+        newmsg['To'] = clean_mail_address(msg['From'])
+        newmsg['Subject'] = 'admin-response to %s' % cmd
+
+        cmd = cmd.split()
+        args = cmd[1:]
+        cmd = cmd[0] if cmd else ''
+        body = ''
+        recipients = self.recipients
+        banned = self.banned
+        if cmd == 'del':
+            for recipient in args:
+                recipient = clean_mail_address(recipient)
+                if recipient not in recipients:
+                    log.info('Unable to remove recipient <%s>' % recipient)
+                    body += 'Unable to remove recipient <%s>\r\n' % recipient
+                else:
+                    recipients.remove(recipient)
+                    log.info('Removed recipient <%s>' % recipient)
+                    body += 'Removed recipient <%s>\r\n' % recipient
+            self.recipients = recipients
+        elif cmd == 'add':
+            for recipient in args:
+                recipient = clean_mail_address(recipient)
+                if recipient in recipients:
+                    log.info('Recipient <%s> is already member of this list' % recipient)
+                    body += 'Recipient <%s> is already member of this list\r\n' % recipient
+                else:
+                    recipients.append(recipient)
+                    log.info('Added recipient <%s>' % recipient)
+                    body += 'Added recipient <%s>\r\n' % recipient
+            self.recipients = recipients
+        elif cmd == 'unban':
+            for recipient in args:
+                recipient = clean_mail_address(recipient)
+                if recipient not in banned:
+                    log.info('Unable to unban sender <%s>' % recipient)
+                    body += 'Unable to unban sender <%s>\r\n' % recipient
+                else:
+                    banned.remove(recipient)
+                    log.info('Unbanned sender <%s>' % recipient)
+                    body += 'Unbanned sender <%s>\r\n' % recipient
+            self.banned = banned
+        elif cmd == 'ban':
+            for recipient in args:
+                recipient = clean_mail_address(recipient)
+                if recipient in banned:
+                    log.info('Sender <%s> has already been banned' % recipient)
+                    body += 'Sender <%s> has already been banned\r\n' % recipient
+                else:
+                    banned.append(recipient)
+                    log.info('Banned sender <%s>' % recipient)
+                    body += 'Banned sender <%s>\r\n' % recipient
+            self.banned = banned
+        else:
+            body += 'Ignoring unknown admin command <%s>\r\n\r\n' % subject
+            body += 'Admin commands to be placed in the subject line:\r\n'
+            body += 'admin add <addr1> <addr2> ... <addrn>\r\n'
+            body += 'admin del <addr1> <addr2> ... <addrn>\r\n'
+            body += 'admin ban <addr1> <addr2> ... <addrn>\r\n'
+            body += 'admin unban <addr1> <addr2> ... <addrn>\r\n'
+
+        body += '\r\n\r\n***** Recipients of mailing-list %s *****' % self.list_address
+        for recipient in self.recipients:
+            body += '  %s\r\n' % recipient
+
+        body += '\r\n\r\n***** Banned from mailing-list %s *****' % self.list_address
+        for banned in self.banned:
+            body += '  %s\r\n' % banned
+
+        newmsg.set_payload(body)
+        smtp_connection.sendmail(self.list_address, newmsg['To'], newmsg.as_string())
+
+        pop_connection.dele(msg.num)
+        log.info('Deleted admin mail <%s>' % msg.num)
+
+    def _forward_mail(self, pop_connection, smtp_connection, msg):
+        allowed_headers = ['From', 'Date', 'Subject', 'Message-ID', 'MIME-Version', 'Content-Type',
+                           'Content-Transfer-Encoding', 'In-Reply-To', 'References', 'Received']
+        for item in msg.items():
+            if item[0] not in allowed_headers:
+                del msg[item[0]]
+
+        msg['Reply-To'] = self.list_address
+        msg['To'] = self.list_address
+        subject = msg['Subject']
+        if not subject:
+            subject = ''
+        subject_header = email.header.decode_header(subject)[0]
+        subject, charset = subject_header[0:2]
+
+        for bad in [self.subject_prefix] + self.stripped_subject_prefixes:
+            subject = subject.replace(bad, '')
+        subject = self.subject_prefix + subject
+        subject = subject.strip()
+        del msg['Subject']
+        msg['Subject'] = email.header.make_header([(subject, charset)]).encode()
+
+        # avoid bouncing
+        sender_address = clean_mail_address(msg['from'])
+        for receiver_address in self.recipients:
+            if not self.config.getboolean('DEFAULT', 'bounce') and sender_address == receiver_address:
+                continue
+            log.info('Forwarding to <%s>, subject: <%s>' % (receiver_address, subject))
+            smtp_connection.sendmail(self.list_address, receiver_address, msg.as_string())
+
+        pop_connection.dele(msg.num)
+        log.info('Deleted mail <%s>' % msg.num)
+
+    def _archive_message(self, msg):
+        archive_dir = self.config.get('DEFAULT', 'archive_dir')
+        sender_address = clean_mail_address(msg['From'])
+        file_name = '%s %s.txt' % (datetime.today().strftime('%Y-%m-%d %H:%M:%S'), sender_address)
+
+        with open(os.path.join(archive_dir, file_name), 'w') as archive_file:
+            archive_file.write(msg.as_string())
+
+    def deliver(self):
+        try:
+            pop_connection = poplib.POP3_SSL(self.config.get('POP', 'host'))
+            pop_connection.user(self.config.get('POP', 'user'))
+            pop_connection.pass_(self.config.get('POP', 'password'))
+        except poplib.error_proto, e:
+            log.error('POP3 connection error: %s' % e)
+            return
+
+        messages = pop_connection.list()[1]
+        pending = []
+        for msg_line in messages:
+            msg_num = msg_line.split(' ')[0]
+            log.info('Fetching mail <%s>' % msg_num)
+            msg = pop_connection.retr(msg_num)
+            msg = msg[1]
+            msg = '\r\n'.join(msg)
+            msg = email.message_from_string(msg)
+            if 'Subject' not in msg:
+                msg['Subject'] = ''
+
+            # check whether email address is on blacklist
+            is_spam = False
+            sender_address = clean_mail_address(msg['From'])
+            for banned_address in self.banned:
+                is_spam |= (sender_address == banned_address)
+            if is_spam:
+                log.info('Ignoring spam from <%s>' % sender_address)
+                pop_connection.dele(msg_num)
+                continue
+
+            msg.num = msg_num
+            msg.sender_address = sender_address
+            self._archive_message(msg)
+            pending.append(msg)
+
+        if len(pending) == 0:
+            pop_connection.quit()
+            return
+
+        if self.config.getboolean('SMTP', 'use_tls'):
+            smtp_connection = smtplib.SMTP(self.config.get('SMTP', 'host'))
+            smtp_connection.starttls()
+        else:
+            smtp_connection = smtplib.SMTP_SSL(self.config.get('SMTP', 'host'))
+
+        smtp_connection.login(self.config.get('SMTP', 'user'), self.config.get('SMTP', 'password'))
+
+        for msg in pending:
+            log.info('Processing mail <%s> from <%s>' % (msg.num, msg.sender_address))
+            if msg['Subject'][0:5] == 'admin':
+                self._handle_admin_msg(pop_connection, smtp_connection, msg)
+            else:
+                self._forward_mail(pop_connection, smtp_connection, msg)
+
+        pop_connection.quit()
+        smtp_connection.quit()
+
+    def loop(self):
+        while True:
+            self.deliver()
+            time.sleep(self.config.getint('DEFAULT', 'interval'))
+
 
 def main():
-	try:
-		#conn = poplib.POP3(pophost)
-		popcon = poplib.POP3_SSL(pophost)
-		popcon.user(popuser)
-		popcon.pass_(poppass)
-	except poplib.error_proto:
-		print "POP3 connection error"
-		return
-	
-	msglist = popcon.list()[1]
-	pending = []
-	for i in msglist:
-		msgnum = i.split(" ")[0]
-		msg = popcon.retr(msgnum)
-		msg = msg[1]
-		msg = "\r\n".join(msg)
-		msg = email.message_from_string(msg)
-		if not msg.has_key('Subject'):
-			msg['Subject'] = ""
-		isSpam = False
-		for banned in getBanned():
-			if plainMail(msg['From']) == banned:
-				isSpam = True
-		if isSpam:
-			print "SPAM " + plainMail(msg['From']) + "\n"
-			popcon.dele(msgnum)
-			continue
-		logMsg(msg)
-		pending.append([msgnum,msg])
-	
-	if len(pending) == 0:
-		popcon.quit()
-		return
+    config_filename = sys.argv[1] if len(sys.argv) == 2 else 'config.cfg'
+    mailer = SimpleListMailer(config_filename)
 
-	smtpcon = smtplib.SMTP(smtphost)
-	smtpcon.starttls()
-	#smtpcon = smtplib.SMTP_SSL(smtphost)
-	#smtpcon.set_debuglevel(1)
-	smtpcon.login(smtpuser, smtppass)
+    log.setLevel(logging.INFO)
+    log_file = os.path.join(mailer.config.get('DEFAULT', 'log_dir'), 'simple_list_mailer.log')
+    handler = TimedRotatingFileHandler(log_file)
+    handler.setFormatter(logging.Formatter(fmt='%(asctime)s %(message)s'))
+    log.addHandler(handler)
 
-	for [num,msg] in pending:
-		print "FROM " + plainMail(msg['From'])
-		if msg['Subject'][0:5] == "admin":
-			adminMsg(smtpcon, msg)
-		else:
-			print "SUBJECT " + msg['Subject']
-			forwardMsg(smtpcon, msg)
-		popcon.dele(num)
-		print ""
+    log.info(' Simple List Mailer '.center(80, '='))
+    mailer.loop()
 
-	popcon.quit()
-	smtpcon.quit()
 
-#----------------------------------------------
-
-if __name__ == "__main__":
-	lockfile = open('/tmp/simple_list_mailer.lock', 'w')
-	try:
-		fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-	except IOError:
-		print "The script is already running"
-		quit()
-
-	try:
-		main()
-	finally:
-		fcntl.flock(lockfile, fcntl.LOCK_UN | fcntl.LOCK_NB)
+if __name__ == '__main__':
+    main()

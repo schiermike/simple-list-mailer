@@ -146,11 +146,11 @@ class SimpleListMailer(object):
             body += 'admin ban <addr1> <addr2> ... <addrn>\r\n'
             body += 'admin unban <addr1> <addr2> ... <addrn>\r\n'
 
-        body += '\r\n\r\n***** Recipients of mailing-list %s *****' % self.list_address
+        body += '\r\n\r\n***** Recipients of mailing-list %s *****\r\n' % self.list_address
         for recipient in self.recipients:
             body += '  %s\r\n' % recipient
 
-        body += '\r\n\r\n***** Banned from mailing-list %s *****' % self.list_address
+        body += '\r\n\r\n***** Banned from mailing-list %s *****\r\n' % self.list_address
         for banned in self.banned:
             body += '  %s\r\n' % banned
 
@@ -269,7 +269,7 @@ def main():
 
     log.setLevel(logging.INFO)
     log_file = os.path.join(mailer.config.get('DEFAULT', 'log_dir'), 'simple_list_mailer.log')
-    handler = TimedRotatingFileHandler(log_file)
+    handler = TimedRotatingFileHandler(log_file, when='W0')
     handler.setFormatter(logging.Formatter(fmt='%(asctime)s %(message)s'))
     log.addHandler(handler)
 

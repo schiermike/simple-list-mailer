@@ -183,12 +183,10 @@ class SimpleListMailer(object):
         msg['Subject'] = email.header.make_header([(subject, charset)]).encode()
 
         # avoid bouncing
-        sender_address = clean_mail_address(msg['from'])
-        for receiver_address in self.recipients:
-            if not self.config.getboolean('DEFAULT', 'bounce') and sender_address == receiver_address:
-                continue
-            log.info('Forwarding to <%s>, subject: <%s>' % (receiver_address, subject))
-            smtp_connection.sendmail(self.list_address, receiver_address, msg.as_string())
+        from_addr = clean_mail_address(msg['from'])
+        to_addrs = filter(lambda r: self.config.getboolean('DEFAULT', 'bounce') or from_addr == r, self.recipients)
+        log.info('Forwarding to <%s>, subject: <%s>' % (to_addrs, subject))
+        smtp_connection.sendmail(self.list_address, to_addrs, msg.as_string())
 
         pop_connection.dele(msg.num)
         log.info('Deleted mail <%s>' % msg.num)

@@ -184,7 +184,7 @@ class SimpleListMailer(object):
 
         # avoid bouncing
         from_addr = clean_mail_address(msg['from'])
-        to_addrs = filter(lambda r: self.config.getboolean('DEFAULT', 'bounce') or from_addr == r, self.recipients)
+        to_addrs = filter(lambda r: self.config.getboolean('DEFAULT', 'bounce') or from_addr != r, self.recipients)
         log.info('Forwarding to <%s>, subject: <%s>' % (to_addrs, subject))
         smtp_connection.sendmail(self.list_address, to_addrs, msg.as_string())
 

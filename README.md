@@ -19,10 +19,3 @@ Installation
 
 3. If you don't want to start the process directly but want to use e.g. supervise to run the daemon instead, add the
    run configuration to the /etc/service folder.
-
-Notes
------
-
-The current implementation sends an email to each registered address in a loop. When there is a high number of
-subscribers, this is clearly not an optimal solution especially in the presence of large attachments. Using the
-BCC field for all receivers is a good alternative!

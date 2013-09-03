@@ -1,2 +1,6 @@
 /.idea
 *.pyc
+/daemon.log
+/daemon
+/logs
+/mail

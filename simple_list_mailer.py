@@ -6,12 +6,15 @@ the mail to a list of recipients
 """
 
 import os
+import socket
 import time
 import poplib
 import smtplib
 import email
 import sys
 import ConfigParser
+from cStringIO import StringIO
+from email.generator import Generator
 import logging
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
@@ -24,6 +27,32 @@ def clean_mail_address(addr):
     while addr.count('>') > 0:
         addr = addr[:addr.index('>')]
     return addr.lower()
+
+
+def email_as_string(msg):
+    fp = StringIO()
+    g = Generator(fp, mangle_from_=False, maxheaderlen=60)
+    g.flatten(msg)
+    return fp.getvalue()
+
+def _handle_text(self, msg):
+    payload = msg.get_payload()
+    if payload is None:
+        return
+    cset = msg.get_charset()
+    if cset is not None:
+        payload = cset.body_encode(payload)
+    if not isinstance(payload, basestring):
+        # AGW start
+        # Changed to handle malformed messages with a text base
+        # type and a multipart content
+        if type(payload) == type([]) and msg.is_multipart():
+            return 'this email is shit'
+        else:
+            raise TypeError, 'string payload expected: %s' % type(payload)
+        # AGW end
+    self._fp.write(payload)
+Generator._handle_text = _handle_text
 
 
 class SimpleListMailer(object):
@@ -155,7 +184,7 @@ class SimpleListMailer(object):
             body += '  %s\r\n' % banned
 
         newmsg.set_payload(body)
-        smtp_connection.sendmail(self.list_address, newmsg['To'], newmsg.as_string())
+        smtp_connection.sendmail(self.list_address, newmsg['To'], email_as_string(newmsg))
 
         pop_connection.dele(msg.num)
         log.info('Deleted admin mail <%s>' % msg.num)
@@ -186,7 +215,7 @@ class SimpleListMailer(object):
         from_addr = clean_mail_address(msg['from'])
         to_addrs = filter(lambda r: self.config.getboolean('DEFAULT', 'bounce') or from_addr != r, self.recipients)
         log.info('Forwarding to <%s>, subject: <%s>' % (to_addrs, subject))
-        smtp_connection.sendmail(self.list_address, to_addrs, msg.as_string())
+        smtp_connection.sendmail(self.list_address, to_addrs, email_as_string(msg))
 
         pop_connection.dele(msg.num)
         log.info('Deleted mail <%s>' % msg.num)
@@ -197,7 +226,7 @@ class SimpleListMailer(object):
         file_name = '%s %s.txt' % (datetime.today().strftime('%Y-%m-%d %H:%M:%S'), sender_address)
 
         with open(os.path.join(archive_dir, file_name), 'w') as archive_file:
-            archive_file.write(msg.as_string())
+            archive_file.write(email_as_string(msg))
 
     def deliver(self):
         try:
@@ -259,8 +288,13 @@ class SimpleListMailer(object):
 
     def loop(self):
         while True:
-            self.deliver()
-            time.sleep(self.config.getint('DEFAULT', 'interval'))
+	    try:
+                self.deliver()
+                time.sleep(self.config.getint('DEFAULT', 'interval'))
+            except socket.error, e:
+	        log.warn(e.message)
+            except Exception, e:
+                log.exception(e)
 
 
 def main():
